@@ -20,6 +20,7 @@ import h.Hchat.hooks.items.miniprogramsplashad.SkipGlobalMiniProgramSplashAdsFea
 import h.Hchat.hooks.items.miniprogramvideoad.SkipMiniProgramVideoAdsFeature;
 import h.Hchat.hooks.items.floatingshortcut.FloatingShortcutRuntime;
 import h.Hchat.hooks.items.script.ScriptPluginRuntime;
+import h.Hchat.hooks.items.script.agent.ModuleResourceMenuFallback;
 import h.Hchat.hooks.items.script.agent.ScriptPluginAgentLocalReverseTools;
 import h.Hchat.hooks.items.tablet.WeChatTabletFeature;
 import h.Hchat.loader.utils.NativeLibraryLoader;
@@ -407,6 +408,8 @@ public class ModuleEntry implements IXposedHookLoadPackage {
             // 2. 创建模块自身 Context
             Context moduleContext = createModuleContext(hostContext);
             ConfigStore configStore = new ConfigStore(hostContext);
+
+            ModuleResourceMenuFallback.INSTANCE.install(resolveHostClassLoader(hostContext, lpparam));
 
             DexInstallScheduler.runDexKitTask(() -> {
                 // 3. 初始化 DexKit。优先使用 Tinker 之后的运行时 ClassLoader。

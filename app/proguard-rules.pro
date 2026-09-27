@@ -54,6 +54,18 @@
 -keep class h.Hchat.crash.NativeCrashBridge { *; }
 -keep class h.Hchat.crash.CrashExitInfoApi30 { *; }
 
+# Termux 终端：JNI 类的 native 方法按 Java_com_termux_terminal_JNI_* 符号绑定 libtermux.so，
+# 类名/方法名一旦被 R8 改名，动态绑定就找不到符号。整包 keep 最稳。
+-keep class com.termux.terminal.** { *; }
+-keep class com.termux.view.** { *; }
+-keepclasseswithmembernames class com.termux.terminal.JNI {
+    native <methods>;
+}
+# 反射注入 native 库搜索路径用到的加载器
+-keep class h.Hchat.loader.utils.NativeLibraryLoader { *; }
+-keep class h.Hchat.hooks.items.script.agent.ProotTerminalView { *; }
+-keep class h.Hchat.hooks.items.script.agent.ProotEnvironment { *; }
+
 # 保留反射访问的微信内部类字段名
 -keepclassmembers class * {
     java.lang.String e;

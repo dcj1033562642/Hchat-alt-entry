@@ -9,10 +9,13 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.RandomAccessFile;
+import java.util.ArrayList;
+import java.util.List;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.zip.CRC32;
+import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 import de.robv.android.xposed.XposedBridge;
@@ -31,6 +34,8 @@ public class NativeLibraryLoader {
     private static final String SILK_CODEC_LIB = "silk_codec";
     private static final String CRASH_GUARD_SO = "libhchat_crash.so";
     private static final String CRASH_GUARD_LIB = "hchat_crash";
+    private static final String TERMUX_SO = "libtermux.so";
+    private static final String TERMUX_LIB_PATH_PROPERTY = "hchat.termux.lib.path";
 
     public void loadDexKit(Context ctx, ClassLoader moduleClassLoader) {
         loadLibrary(ctx, moduleClassLoader, DEXKIT_SO, DEXKIT_LIB, false);
@@ -42,6 +47,71 @@ public class NativeLibraryLoader {
 
     public boolean loadCrashGuard(Context ctx, ClassLoader moduleClassLoader) {
         return loadLibrary(ctx, moduleClassLoader, CRASH_GUARD_SO, CRASH_GUARD_LIB, true);
+    }
+
+    public boolean loadTermux(Context ctx, ClassLoader moduleClassLoader) {
+        try {
+            String path = resolveTermuxSoPath(ctx, moduleClassLoader);
+            if (path == null) {
+                h.Hchat.utils.HLog.e(TAG + " loadTermux 找不到 " + TERMUX_SO);
+                return false;
+            }
+            System.setProperty(TERMUX_LIB_PATH_PROPERTY, path);
+            try {
+                System.load(path);
+            } catch (Throwable t) {
+                h.Hchat.utils.HLog.e(TAG + " 预加载 " + TERMUX_SO + " 失败: " + t.getMessage());
+            }
+            return true;
+        } catch (Throwable e) {
+            h.Hchat.utils.HLog.e(TAG + " loadTermux 失败: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    private String resolveTermuxSoPath(Context ctx, ClassLoader moduleClassLoader) {
+        String moduleApk = getModuleApkPath(moduleClassLoader);
+        if (moduleApk != null) {
+            File parent = new File(moduleApk).getParentFile();
+            if (parent != null) {
+                File[] archDirs = new File(parent, "lib").listFiles();
+                if (archDirs != null) {
+                    for (File archDir : archDirs) {
+                        File so = new File(archDir, TERMUX_SO);
+                        if (so.isFile() && so.length() > 0) return so.getAbsolutePath();
+                    }
+                }
+            }
+        }
+        try {
+            File dir = prepareTermuxNativeDir(ctx, moduleClassLoader);
+            if (dir != null) {
+                File so = new File(dir, TERMUX_SO);
+                if (so.isFile() && so.length() > 0) return so.getAbsolutePath();
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private File prepareTermuxNativeDir(Context ctx, ClassLoader moduleClassLoader) throws Exception {
+        String moduleApk = getModuleApkPath(moduleClassLoader);
+        if (moduleApk == null || moduleApk.length() == 0) return null;
+        String abi = "arm64-v8a";
+        File dir = new File(new File(ctx.getCacheDir(), "Hchat_termux"), abi);
+        dir.mkdirs();
+        File dest = new File(dir, TERMUX_SO);
+        try (ZipFile apk = new ZipFile(moduleApk)) {
+            ZipEntry entry = apk.getEntry("lib/" + abi + "/" + TERMUX_SO);
+            if (entry == null) return null;
+            boolean valid = dest.isFile() && dest.length() == entry.getSize() && dest.length() > 0;
+            if (!valid) {
+                extractLibrary(apk, entry, dir, TERMUX_SO, dest);
+            }
+        }
+        dest.setReadable(true, false);
+        dest.setExecutable(true, false);
+        return dir;
     }
 
     /**

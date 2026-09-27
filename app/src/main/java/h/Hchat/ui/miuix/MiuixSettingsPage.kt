@@ -115,10 +115,14 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -128,11 +132,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.SideEffect
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -163,6 +169,10 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.state.ToggleableState
@@ -917,6 +927,10 @@ private object NavIcons {
     val Info: ImageVector = navIcon(
         name = "Rounded.Info",
         path = "M11,17h2v-6h-2v6z M12,2C6.48,2 2,6.48 2,12s4.48,10 10,10 10,-4.48 10,-10S17.52,2 12,2z M12,20c-4.41,0 -8,-3.59 -8,-8s3.59,-8 8,-8 8,3.59 8,8 -3.59,8 -8,8z M11,9h2V7h-2v2z"
+    )
+    val Terminal: ImageVector = navIcon(
+        name = "Rounded.Terminal",
+        path = "M20,4H4C2.9,4 2,4.9 2,6v12c0,1.1 0.9,2 2,2h16c1.1,0 2,-0.9 2,-2V6C22,4.9 21.1,4 20,4z M20,18H4V6h16V18z M18,15h-6v-1.5h6V15z M7.5,15l-1.06,-1.06L8.38,12L6.44,10.06L7.5,9l3,3L7.5,15z"
     )
 
     private fun navIcon(name: String, path: String): ImageVector {
@@ -28272,7 +28286,7 @@ fun ScriptPluginMarketPage(
                 context = context,
                 query = query.trim(),
                 sort = sort,
-                limit = 100
+                limit = Int.MAX_VALUE
             )
         }
         result.fold(
@@ -28292,7 +28306,7 @@ fun ScriptPluginMarketPage(
         notificationsLoading = true
         notificationsError = ""
         val result = withContext(Dispatchers.IO) {
-            PluginMarketRepository.notifications(context, limit = 100)
+            PluginMarketRepository.notifications(context, limit = Int.MAX_VALUE)
         }
         result.fold(
             onSuccess = { page ->
@@ -33560,6 +33574,228 @@ private fun ScriptPluginAgentConfigPage(
                     }
                 }
             }
+            item { SmallTitle(modifier = Modifier.padding(top = 10.dp), text = "Ubuntu 终端环境") }
+            item { ScriptPluginAgentTerminalCard() }
+        }
+    }
+}
+
+@Composable
+private fun ScriptPluginAgentTerminalCard() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var status by remember {
+        mutableStateOf(h.Hchat.hooks.items.script.agent.ProotEnvironment.refreshStatus(context))
+    }
+    var diskText by remember { mutableStateOf("") }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showTerminal by remember { mutableStateOf(false) }
+
+    fun refreshDisk() {
+        scope.launch(Dispatchers.IO) {
+            val bytes = h.Hchat.hooks.items.script.agent.ProotEnvironment.diskUsage(context)
+            val mb = bytes / 1048576.0
+            withContext(Dispatchers.Main) {
+                diskText = if (bytes > 0) String.format(Locale.US, "占用 %.1f MB", mb) else ""
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        status = h.Hchat.hooks.items.script.agent.ProotEnvironment.refreshStatus(context)
+        refreshDisk()
+    }
+
+    val installing = status.state ==
+        h.Hchat.hooks.items.script.agent.ProotEnvironment.State.INSTALLING
+    val ready = status.state ==
+        h.Hchat.hooks.items.script.agent.ProotEnvironment.State.READY
+
+    fun startInstall(force: Boolean) {
+        if (installing) return
+        scope.launch(Dispatchers.IO) {
+            h.Hchat.hooks.items.script.agent.ProotEnvironment.install(context, force = force) { pct, msg ->
+                scope.launch(Dispatchers.Main) {
+                    status = h.Hchat.hooks.items.script.agent.ProotEnvironment.currentStatus()
+                }
+            }
+            val done = h.Hchat.hooks.items.script.agent.ProotEnvironment.refreshStatus(context)
+            withContext(Dispatchers.Main) {
+                status = done
+                refreshDisk()
+            }
+        }
+    }
+
+    if (showDeleteConfirm) {
+        WindowDialog(
+            show = true,
+            title = "删除终端环境",
+            onDismissRequest = { showDeleteConfirm = false },
+            content = {
+                Column {
+                    Text(
+                        text = "将删除已下载的 Ubuntu 环境并释放磁盘空间。下次使用需重新下载。",
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        fontSize = 13.sp
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        TextButton(
+                            text = "取消",
+                            onClick = { showDeleteConfirm = false },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.textButtonColorsPrimary()
+                        )
+                        TextButton(
+                            text = "删除",
+                            onClick = {
+                                showDeleteConfirm = false
+                                scope.launch(Dispatchers.IO) {
+                                    h.Hchat.hooks.items.script.agent.ProotEnvironment.uninstall(context)
+                                    val s = h.Hchat.hooks.items.script.agent.ProotEnvironment.refreshStatus(context)
+                                    withContext(Dispatchers.Main) {
+                                        status = s
+                                        refreshDisk()
+                                    }
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.textButtonColors()
+                        )
+                    }
+                }
+            }
+        )
+    }
+
+    SettingsCard {
+        val stateSummary = when (status.state) {
+            h.Hchat.hooks.items.script.agent.ProotEnvironment.State.READY ->
+                "已就绪${if (diskText.isNotBlank()) "，$diskText" else ""}"
+            h.Hchat.hooks.items.script.agent.ProotEnvironment.State.INSTALLING ->
+                if (status.progress in 0..100) "安装中 ${status.progress}% · ${status.message}"
+                else "安装中 · ${status.message}"
+            h.Hchat.hooks.items.script.agent.ProotEnvironment.State.ERROR ->
+                status.message.ifBlank { "安装失败" }
+            h.Hchat.hooks.items.script.agent.ProotEnvironment.State.DEGRADED ->
+                "降级模式，部分功能不可用"
+            else -> "未安装，run_command 需要此环境（约 279MB 下载，已内置 codex 与 DexClub）"
+        }
+        InfoRow(
+            label = "环境状态",
+            value = stateSummary
+        )
+        InsetDivider()
+        if (!ready) {
+            ActionRow(
+                if (installing) "正在安装…" else "安装 Ubuntu 终端",
+                "首次需联网下载，完成后 Agent 可用 run_command"
+            ) { if (!installing) startInstall(false) }
+        } else {
+            ActionRow("打开终端", "在 Ubuntu 环境里直接敲命令") { showTerminal = true }
+            InsetDivider()
+            ActionRow("重新安装", "重新下载并解压 Ubuntu 环境") {
+                if (!installing) startInstall(true)
+            }
+            InsetDivider()
+            ActionRow("删除终端环境", "释放磁盘空间") { showDeleteConfirm = true }
+        }
+    }
+
+    if (showTerminal) {
+        ScriptPluginAgentTerminalDialog(onDismiss = { showTerminal = false })
+    }
+}
+
+@Composable
+private fun ScriptPluginAgentTerminalDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    var ready by remember { mutableStateOf(h.Hchat.hooks.items.script.agent.ProotEnvironment.isReady(context)) }
+    var upgrading by remember { mutableStateOf(false) }
+    var upgradeText by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        val env = h.Hchat.hooks.items.script.agent.ProotEnvironment
+        if (!env.needsUpgrade(context)) return@LaunchedEffect
+        upgrading = true
+        upgradeText = "正在准备终端环境…"
+        withContext(Dispatchers.IO) {
+            env.install(context) { pct, msg -> upgradeText = "$msg $pct%" }
+        }
+        upgrading = false
+        ready = env.isReady(context)
+    }
+    var pageRef by remember {
+        mutableStateOf<h.Hchat.hooks.items.script.agent.TermuxTerminalPage?>(null)
+    }
+    val density = LocalDensity.current
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
+    ) {
+        val dialogView = LocalView.current
+        SideEffect {
+            var parent: android.view.ViewParent? = dialogView.parent
+            while (parent != null) {
+                val window = (parent as? DialogWindowProvider)?.window
+                if (window != null) {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+                    window.setSoftInputMode(
+                        WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING or
+                            WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED
+                    )
+                    window.setDimAmount(0f)
+                    window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(0xFF000000.toInt()))
+                    break
+                }
+                parent = parent.parent
+            }
+        }
+        Box(modifier = Modifier.fillMaxSize().background(Color(0xFF000000))) {
+            if (upgrading) {
+                Text(
+                    text = "$upgradeText\n正在更新终端环境（内置 codex 与 DexClub，约 279MB），完成后自动进入终端。",
+                    color = Color(0xFF9AA0A6),
+                    fontSize = 13.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(20.dp)
+                )
+            } else if (!ready) {
+                Text(
+                    text = "Ubuntu 终端环境未安装。\n请先在「Agent 配置 → Ubuntu 终端环境」里点安装，完成后再打开终端。",
+                    color = Color(0xFF9AA0A6),
+                    fontSize = 13.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(20.dp)
+                )
+            } else {
+                AndroidView(
+                    factory = { ctx ->
+                        h.Hchat.hooks.items.script.agent.TermuxTerminalPage(ctx).also { page ->
+                            pageRef = page
+                            page.start()
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+                val barsTopPx = with(density) {
+                    WindowInsets.statusBars.asPaddingValues().calculateTopPadding().roundToPx()
+                }
+                val imeBottom = WindowInsets.ime.asPaddingValues().calculateBottomPadding()
+                val bottomPx = with(density) { imeBottom.roundToPx() }
+                SideEffect {
+                    pageRef?.applyInsetsFromCompose(barsTopPx, bottomPx, imeBottom > 0.dp)
+                }
+            }
+            DisposableEffect(Unit) {
+                onDispose { pageRef?.destroy() }
+            }
         }
     }
 }
@@ -33829,6 +34065,10 @@ private fun ScriptPluginAgentChatPage(
     val renderedMessages = remember(messages) {
         scriptPluginAgentRenderedMessages(messages)
     }
+    var showTerminal by remember { mutableStateOf(false) }
+    if (showTerminal) {
+        ScriptPluginAgentTerminalDialog(onDismiss = { showTerminal = false })
+    }
 
     fun consumeActionMessageIndex(): Int? {
         val messageId = actionMessageId
@@ -33965,10 +34205,16 @@ private fun ScriptPluginAgentChatPage(
         onBack = onBack,
         topBarActions = {
             Image(
+                imageVector = NavIcons.Terminal,
+                contentDescription = "Ubuntu 终端",
+                colorFilter = ColorFilter.tint(MiuixTheme.colorScheme.onSurface),
+                modifier = Modifier.size(24.dp).responsiveTap(onClick = { showTerminal = true })
+            )
+            Image(
                 imageVector = NavIcons.Compact,
                 contentDescription = "压缩上下文",
                 colorFilter = ColorFilter.tint(MiuixTheme.colorScheme.onSurface),
-                modifier = Modifier.size(24.dp).responsiveTap(onClick = onCompact)
+                modifier = Modifier.padding(start = 14.dp).size(24.dp).responsiveTap(onClick = onCompact)
             )
             Image(
                 imageVector = NavIcons.History,

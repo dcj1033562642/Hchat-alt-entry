@@ -36,3 +36,4 @@ reverse_case/
 
 # Temporary media/test output
 tmp_video_frames/
+.hermes/

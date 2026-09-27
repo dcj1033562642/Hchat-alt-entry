@@ -61,6 +61,9 @@ android {
 
     packaging {
         jniLibs {
+            // 保持 true：proot 需要 libproot.so 被解压到 nativeLibraryDir 才能 exec 运行。
+            // libtermux.so 的加载不走 classloader.findLibrary，改由 Hchat 用绝对路径
+            // System.load() 加载（见 NativeLibraryLoader.loadTermux + com.termux.terminal.JNI 补丁）。
             useLegacyPackaging = true
         }
         resources {
@@ -129,6 +132,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
     implementation(files("libs/miuix-blur-android-0.9.4.aar"))
     implementation(files("libs/miuix-shader-android-0.9.4.aar"))
+    // Termux 终端（GPLv3，LSPilot 同款）：terminal-view 依赖 terminal-emulator
+    implementation(files("libs/terminal-emulator-0.118.0.aar"))
+    implementation(files("libs/terminal-view-0.118.0.aar"))
 }
 
 // 构建完成后自动复制 APK 到 dist/
