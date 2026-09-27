@@ -44,6 +44,10 @@ class TermuxTerminalPage(context: Context) : LinearLayout(context) {
         val ALT = ExtraKey("ALT", "@alt")
         val SHIFT = ExtraKey("SHIFT", "@shift")
 
+        val SESSIONS = ExtraKey("DRAWER", "@sessions")
+
+        val MODIFIER_SEQS = setOf("@ctrl", "@alt", "@shift")
+
         val DISPLAY_MAP = mapOf(
             "LEFT" to "\u2190",
             "RIGHT" to "\u2192",
@@ -71,7 +75,7 @@ class TermuxTerminalPage(context: Context) : LinearLayout(context) {
                 ExtraKey("ENTER", "\r"),
             ),
             listOf(
-                ExtraKey("INS", "\u001B[2~"),
+                SESSIONS,
                 ExtraKey("END", "\u001B[F"),
                 SHIFT,
                 ExtraKey(":", ":"),
@@ -167,7 +171,9 @@ class TermuxTerminalPage(context: Context) : LinearLayout(context) {
 
     fun start(): Boolean = terminal.start()
 
-    fun destroy() = terminal.destroySession()
+    fun detach() = terminal.detach()
+
+    fun setOnExitRequested(cb: () -> Unit) = terminal.setOnExitRequested(cb)
 
     private fun buildKeysRow() {
         keysRow.rowCount = KEYS.size
@@ -194,7 +200,7 @@ class TermuxTerminalPage(context: Context) : LinearLayout(context) {
         button.gravity = Gravity.CENTER
         button.stateListAnimator = null
         button.background = ColorDrawable(Color.TRANSPARENT)
-        if (key.seq.startsWith("@")) modifierButtons[key.seq] = button
+        if (key.seq in MODIFIER_SEQS) modifierButtons[key.seq] = button
         button.setOnClickListener { handleKey(key) }
         button.setOnTouchListener { v, event ->
             when (event.actionMasked) {
@@ -238,6 +244,8 @@ class TermuxTerminalPage(context: Context) : LinearLayout(context) {
                 terminal.setShiftActive(!terminal.shiftActive)
                 refreshModifierColors()
             }
+
+            "@sessions" -> terminal.showSessionMenu()
 
             else -> terminal.sendKey(key.seq)
         }

@@ -18,7 +18,7 @@ object ProotEnvironment {
 
     private const val ROOTFS_PATH = "/rootfs/ubuntu-base-arm64.tar.gz"
     private const val ROOTFS_SHA256 =
-        "79612663b7f3c7d3aef6b64f4a7e0e4f715be2c94e1be8e7a2f794ee7065fe95"
+        "858ad64fc0d91c514a48c3daa4342607aa7645b3e7be4c65d77cfb17f858b0f1"
 
     private const val TERMINAL_ASSET_DIR = "terminal"
     private val TERMINAL_SCRIPTS = listOf(
@@ -431,6 +431,7 @@ object ProotEnvironment {
         runCatching { ensureApiKeyExport(context) }
         runCatching { ensureFontFile(context) }
         runCatching { ensureCodexConfig(context) }
+        runCatching { ensureCodexAgentsMd(context, File(homeDir(context), ".codex")) }
         runCatching { ensureAgentDocs(context, File(homeDir(context), ".codex")) }
         runCatching { ensureDexclubAutostart(context) }
     }
@@ -597,6 +598,22 @@ object ProotEnvironment {
 
     private fun ensureAgentDocs(context: Context, codexDir: File) {
         val docsDir = File(codexDir, "docs").apply { mkdirs() }
+        val apk = moduleApkPath()
+        if (apk != null) {
+            runCatching {
+                java.util.zip.ZipFile(apk).use { zip ->
+                    for (name in AGENT_DOC_ASSETS) {
+                        val entry = zip.getEntry("assets/$name") ?: continue
+                        val target = File(docsDir, name)
+                        if (target.exists() && target.length() == entry.size) continue
+                        zip.getInputStream(entry).use { input ->
+                            target.outputStream().use { output -> input.copyTo(output) }
+                        }
+                    }
+                }
+            }
+            return
+        }
         val assets = moduleContext(context).assets
         for (name in AGENT_DOC_ASSETS) {
             runCatching {
@@ -615,7 +632,17 @@ object ProotEnvironment {
     private fun ensureDexclubAutostart(context: Context) {
         val bashrc = File(homeDir(context), ".bashrc")
         val existing = runCatching { bashrc.readText() }.getOrDefault("")
-        if (existing.contains(DEXCLUB_AUTOSTART_MARKER)) return
+        if (existing.contains(DEXCLUB_AUTOSTART_MARKER)) {
+            if (existing.contains(DEXCLUB_AUTOSTART_BLOCK.trim())) return
+            val cleaned = stripDexclubBlock(existing)
+            runCatching {
+                bashrc.writeText(
+                    (if (cleaned.isNotEmpty() && !cleaned.endsWith("\n")) "$cleaned\n" else cleaned) +
+                        DEXCLUB_AUTOSTART_BLOCK
+                )
+            }
+            return
+        }
         runCatching {
             bashrc.parentFile?.mkdirs()
             if (existing.isNotEmpty() && !existing.endsWith("\n")) bashrc.appendText("\n")
@@ -623,15 +650,63 @@ object ProotEnvironment {
         }
     }
 
+    private fun stripDexclubBlock(text: String): String {
+        val lines = text.lines()
+        val out = ArrayList<String>(lines.size)
+        var skipping = false
+        for (line in lines) {
+            if (!skipping && line.contains(DEXCLUB_AUTOSTART_MARKER) &&
+                !line.contains("$DEXCLUB_AUTOSTART_MARKER-end")
+            ) {
+                skipping = true
+                continue
+            }
+            if (skipping) {
+                if (line.contains("$DEXCLUB_AUTOSTART_MARKER-end")) skipping = false
+                continue
+            }
+            out.add(line)
+        }
+        return out.joinToString("\n").trimEnd('\n')
+    }
+
+    fun stopDexclub(context: Context) {
+        if (!isReady(context)) return
+        runCatching {
+            exec(
+                context,
+                "for p in \$(ls /proc 2>/dev/null | grep -E '^[0-9]+\$'); do " +
+                    "if grep -qa dexclub /proc/\$p/cmdline 2>/dev/null; then kill -9 \"\$p\" 2>/dev/null; fi; " +
+                    "done; true",
+                timeoutSeconds = 15,
+            )
+        }
+    }
+
     private val DEXCLUB_AUTOSTART_BLOCK = """
         |$DEXCLUB_AUTOSTART_MARKER（自动生成，勿手工编辑；删掉这一整段即可关闭内置逆向）
         |if [ -n "${'$'}PS1" ] && [ -x /opt/dexclub/bin/mcp ]; then
-        |  if ! (exec 3<>/dev/tcp/127.0.0.1/8787) 2>/dev/null; then
-        |    JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64 \
-        |    DEXCLUB_MCP_HOST=127.0.0.1 DEXCLUB_MCP_PORT=8787 \
-        |      nohup /opt/dexclub/bin/mcp >/root/.dexclub-mcp.log 2>&1 &
-        |    disown 2>/dev/null || true
-        |  fi
+        |  (
+        |    flock -n 9 || exit 0
+        |    if (exec 3<>/dev/tcp/127.0.0.1/8787) 2>/dev/null; then
+        |      exec 3>&- 3<&-        # 已在监听：健康，什么都不做（绝不误杀）
+        |    else
+        |      for __p in ${'$'}(ls /proc 2>/dev/null | grep -E '^[0-9]+${'$'}'); do
+        |        if grep -qa dexclub /proc/${'$'}__p/cmdline 2>/dev/null; then kill -9 "${'$'}__p" 2>/dev/null; fi
+        |      done
+        |      unset __p
+        |      JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64 \
+        |      DEXCLUB_MCP_HOST=127.0.0.1 DEXCLUB_MCP_PORT=8787 \
+        |        nohup /opt/dexclub/bin/mcp >/root/.dexclub-mcp.log 2>&1 &
+        |      disown 2>/dev/null || true
+        |      __i=0
+        |      while [ ${'$'}__i -lt 40 ]; do
+        |        if (exec 3<>/dev/tcp/127.0.0.1/8787) 2>/dev/null; then exec 3>&- 3<&-; break; fi
+        |        sleep 0.5; __i=${'$'}((__i+1))
+        |      done
+        |      unset __i
+        |    fi
+        |  ) 9>/tmp/.dexclub-autostart.lock
         |fi
         |$DEXCLUB_AUTOSTART_MARKER-end
         |""".trimMargin()
@@ -867,7 +942,29 @@ object ProotEnvironment {
     private fun dirSize(dir: File): Long {
         if (!dir.exists()) return 0L
         var size = 0L
-        dir.walkTopDown().forEach { if (it.isFile) size += it.length() }
+        val seen = HashSet<Any>()
+        runCatching {
+            java.nio.file.Files.walkFileTree(
+                dir.toPath(),
+                object : java.nio.file.SimpleFileVisitor<java.nio.file.Path>() {
+                    override fun visitFile(
+                        file: java.nio.file.Path,
+                        attrs: java.nio.file.attribute.BasicFileAttributes,
+                    ): java.nio.file.FileVisitResult {
+                        if (attrs.isRegularFile) {
+                            val key = attrs.fileKey()
+                            if (key == null || seen.add(key)) size += attrs.size()
+                        }
+                        return java.nio.file.FileVisitResult.CONTINUE
+                    }
+
+                    override fun visitFileFailed(
+                        file: java.nio.file.Path,
+                        exc: java.io.IOException,
+                    ): java.nio.file.FileVisitResult = java.nio.file.FileVisitResult.CONTINUE
+                },
+            )
+        }
         return size
     }
 

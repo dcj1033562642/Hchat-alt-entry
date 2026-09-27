@@ -33590,13 +33590,23 @@ private fun ScriptPluginAgentTerminalCard() {
     var diskText by remember { mutableStateOf("") }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showTerminal by remember { mutableStateOf(false) }
+    // 内置 codex 更新（服务器清单驱动，不依赖官方 chatgpt.com 通道）
+    var codexVersion by remember { mutableStateOf("") }
+    var codexRemote by remember { mutableStateOf<h.Hchat.hooks.items.script.agent.CodexUpdater.Release?>(null) }
+    var codexBusy by remember { mutableStateOf(false) }
+    var codexProgress by remember { mutableStateOf("") }
+    var codexMessage by remember { mutableStateOf("") }
+    var showCodexConfirm by remember { mutableStateOf(false) }
 
     fun refreshDisk() {
         scope.launch(Dispatchers.IO) {
             val bytes = h.Hchat.hooks.items.script.agent.ProotEnvironment.diskUsage(context)
-            val mb = bytes / 1048576.0
             withContext(Dispatchers.Main) {
-                diskText = if (bytes > 0) String.format(Locale.US, "占用 %.1f MB", mb) else ""
+                diskText = when {
+                    bytes <= 0 -> ""
+                    bytes >= 1073741824L -> String.format(Locale.US, "占用 %.2f GB", bytes / 1073741824.0)
+                    else -> String.format(Locale.US, "占用 %.0f MB", bytes / 1048576.0)
+                }
             }
         }
     }
@@ -33605,6 +33615,71 @@ private fun ScriptPluginAgentTerminalCard() {
         status = h.Hchat.hooks.items.script.agent.ProotEnvironment.refreshStatus(context)
         refreshDisk()
     }
+
+    fun refreshCodex() {
+        scope.launch(Dispatchers.IO) {
+            val inst = h.Hchat.hooks.items.script.agent.CodexUpdater.installed(context)
+            val remote = h.Hchat.hooks.items.script.agent.CodexUpdater.check(context).getOrNull()
+            val need = remote != null && h.Hchat.hooks.items.script.agent.CodexUpdater.needsUpdate(context, remote)
+            withContext(Dispatchers.Main) {
+                codexVersion = inst?.version.orEmpty()
+                if (need) codexRemote = remote
+            }
+        }
+    }
+
+    fun checkCodexUpdate() {
+        if (codexBusy) return
+        scope.launch(Dispatchers.IO) {
+            val remote = h.Hchat.hooks.items.script.agent.CodexUpdater.check(context).getOrElse { error ->
+                val inst = h.Hchat.hooks.items.script.agent.CodexUpdater.installed(context)
+                withContext(Dispatchers.Main) {
+                    codexVersion = inst?.version.orEmpty()
+                    codexMessage = "检查失败：${error.message.orEmpty()}"
+                }
+                return@launch
+            }
+            val inst = h.Hchat.hooks.items.script.agent.CodexUpdater.installed(context)
+            val need = h.Hchat.hooks.items.script.agent.CodexUpdater.needsUpdate(context, remote)
+            withContext(Dispatchers.Main) {
+                codexVersion = inst?.version.orEmpty()
+                codexRemote = if (need) remote else null
+                if (need) {
+                    codexMessage = ""
+                    showCodexConfirm = true
+                } else {
+                    codexMessage = "已是最新版本 ${inst?.version.orEmpty()}"
+                }
+            }
+        }
+    }
+
+    fun runCodexUpdate(release: h.Hchat.hooks.items.script.agent.CodexUpdater.Release) {
+        if (codexBusy) return
+        showCodexConfirm = false
+        codexBusy = true
+        codexProgress = "准备下载"
+        codexMessage = ""
+        scope.launch(Dispatchers.IO) {
+            val result = h.Hchat.hooks.items.script.agent.CodexUpdater.update(context, release) { pct, msg ->
+                scope.launch(Dispatchers.Main) { codexProgress = "$msg（$pct%）" }
+            }
+            val inst = h.Hchat.hooks.items.script.agent.CodexUpdater.installed(context)
+            withContext(Dispatchers.Main) {
+                codexBusy = false
+                codexProgress = ""
+                codexVersion = inst?.version.orEmpty()
+                codexRemote = null
+                codexMessage = result.fold(
+                    onSuccess = { "已更新到 ${it.version}" },
+                    onFailure = { "更新失败：${it.message.orEmpty()}" }
+                )
+            }
+        }
+    }
+
+    // 进页面时读一次内置 codex 版本，并顺带查服务器有无新版（失败静默，不打扰用户）
+    LaunchedEffect(Unit) { refreshCodex() }
 
     val installing = status.state ==
         h.Hchat.hooks.items.script.agent.ProotEnvironment.State.INSTALLING
@@ -33654,6 +33729,7 @@ private fun ScriptPluginAgentTerminalCard() {
                             onClick = {
                                 showDeleteConfirm = false
                                 scope.launch(Dispatchers.IO) {
+                                    h.Hchat.hooks.items.script.agent.TermuxSessions.closeAll(context)
                                     h.Hchat.hooks.items.script.agent.ProotEnvironment.uninstall(context)
                                     val s = h.Hchat.hooks.items.script.agent.ProotEnvironment.refreshStatus(context)
                                     withContext(Dispatchers.Main) {
@@ -33697,11 +33773,74 @@ private fun ScriptPluginAgentTerminalCard() {
         } else {
             ActionRow("打开终端", "在 Ubuntu 环境里直接敲命令") { showTerminal = true }
             InsetDivider()
+            ActionRow(
+                title = when {
+                    codexBusy -> "正在更新 codex…"
+                    codexRemote != null -> "更新 codex 到 ${codexRemote?.version}"
+                    codexVersion.isBlank() -> "内置 codex"
+                    else -> "内置 codex ${codexVersion}"
+                },
+                summary = when {
+                    codexBusy -> codexProgress.ifBlank { "准备中…" }
+                    codexMessage.isNotBlank() -> codexMessage
+                    codexVersion.isBlank() -> "点按检查服务器上的新版 codex"
+                    else -> "点按检查更新"
+                }
+            ) {
+                if (codexRemote != null) showCodexConfirm = true else checkCodexUpdate()
+            }
+            InsetDivider()
             ActionRow("重新安装", "重新下载并解压 Ubuntu 环境") {
-                if (!installing) startInstall(true)
+                if (!installing) {
+                    // 换 rootfs 前先关掉所有常驻会话（否则跑着的 shell 挂的是旧挂载，且旧 dexclub 会指向已删路径）
+                    h.Hchat.hooks.items.script.agent.TermuxSessions.closeAll(context)
+                    startInstall(true)
+                }
             }
             InsetDivider()
             ActionRow("删除终端环境", "释放磁盘空间") { showDeleteConfirm = true }
+        }
+    }
+
+    if (showCodexConfirm) {
+        codexRemote?.let { release ->
+            WindowDialog(
+                show = true,
+                title = "更新内置 codex ${release.version}",
+                onDismissRequest = { showCodexConfirm = false },
+                content = {
+                    Column {
+                        Text(
+                            text = release.notes.ifBlank { "有新的 codex 版本可用。" },
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                            fontSize = 13.sp
+                        )
+                        Text(
+                            text = "包大小 ${formatFileSize(release.size)}，下载解压期间请勿退出微信。",
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(top = 6.dp)
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            TextButton(
+                                text = "取消",
+                                onClick = { showCodexConfirm = false },
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.textButtonColorsPrimary()
+                            )
+                            TextButton(
+                                text = "更新",
+                                onClick = { runCodexUpdate(release) },
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.textButtonColors()
+                            )
+                        }
+                    }
+                }
+            )
         }
     }
 
@@ -33721,6 +33860,7 @@ private fun ScriptPluginAgentTerminalDialog(onDismiss: () -> Unit) {
         if (!env.needsUpgrade(context)) return@LaunchedEffect
         upgrading = true
         upgradeText = "正在准备终端环境…"
+        h.Hchat.hooks.items.script.agent.TermuxSessions.closeAll(context)
         withContext(Dispatchers.IO) {
             env.install(context) { pct, msg -> upgradeText = "$msg $pct%" }
         }
@@ -33779,6 +33919,8 @@ private fun ScriptPluginAgentTerminalDialog(onDismiss: () -> Unit) {
                     factory = { ctx ->
                         h.Hchat.hooks.items.script.agent.TermuxTerminalPage(ctx).also { page ->
                             pageRef = page
+                            // ☰ →「关闭终端」：结束全部会话后由视图请求关掉对话框
+                            page.setOnExitRequested { onDismiss() }
                             page.start()
                         }
                     },
@@ -33794,7 +33936,7 @@ private fun ScriptPluginAgentTerminalDialog(onDismiss: () -> Unit) {
                 }
             }
             DisposableEffect(Unit) {
-                onDispose { pageRef?.destroy() }
+                onDispose { pageRef?.detach() }
             }
         }
     }

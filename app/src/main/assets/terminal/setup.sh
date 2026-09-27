@@ -211,12 +211,38 @@ info "Node.js APT hook installed"
 
 
 
+# 检测沙箱模式：显式 TERM_MODE 优先，否则探测 root+busybox → chroot，回退 proot（结果缓存）
+detect_term_mode() {
+    if [ -n "$TERM_MODE" ]; then
+        echo "$TERM_MODE"
+        return
+    fi
+    if [ -f "$LOCAL/.term_mode" ]; then
+        cat "$LOCAL/.term_mode"
+        return
+    fi
+    mode="proot"
+    bb=""
+    for c in /data/adb/magisk/busybox /data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox \
+             /system/xbin/busybox /system/bin/busybox; do
+        [ -x "$c" ] && { bb="$c"; break; }
+    done
+    [ -z "$bb" ] && bb="$(command -v busybox 2>/dev/null)"
+    if [ -n "$bb" ]; then
+        if [ "$(su -c 'id -u' 2>/dev/null)" = "0" ]; then
+            mode="chroot"
+        fi
+    fi
+    echo "$mode" > "$LOCAL/.term_mode" 2>/dev/null
+    echo "$mode"
+}
+
 if [ $# -gt 0 ]; then
     sh $@
 else
     clear
-    # 沙箱入口：TERM_MODE=chroot 走 chroot（更快但需 root），否则 proot
-    if [ "$TERM_MODE" = "chroot" ]; then
+    MODE="$(detect_term_mode)"
+    if [ "$MODE" = "chroot" ]; then
         sh $LOCAL/bin/sandbox_chroot
     else
         sh $LOCAL/bin/sandbox_proot

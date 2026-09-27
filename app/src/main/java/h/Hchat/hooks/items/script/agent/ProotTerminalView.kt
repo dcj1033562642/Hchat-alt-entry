@@ -15,18 +15,19 @@ import android.view.View
 import android.widget.FrameLayout
 import android.widget.Toast
 import com.termux.terminal.TerminalSession
-import com.termux.terminal.TerminalSessionClient
 import com.termux.view.TerminalView
 import com.termux.view.TerminalViewClient
 import h.Hchat.utils.HLog
 
 @SuppressLint("ViewConstructor")
 // ☰ 会话菜单：新建会话 / 关闭会话（最后一个会话时即退出终端）/ 关闭终端（结束全部会话）
-class ProotTerminalView(context: Context) : FrameLayout(context) {
+class ProotTerminalView(context: Context) : FrameLayout(context), TermuxSessionView {
 
     private val terminalView: TerminalView = TerminalView(ModuleResourceContext.of(context), null)
+
     private var session: TerminalSession? = null
     private var onFinished: ((Int) -> Unit)? = null
+    private var viewPrepared = false
 
     var ctrlActive: Boolean = false
         private set
@@ -51,55 +52,171 @@ class ProotTerminalView(context: Context) : FrameLayout(context) {
         onFinished = cb
     }
 
+    private var onExitRequested: (() -> Unit)? = null
+
+    fun setOnExitRequested(cb: () -> Unit) {
+        onExitRequested = cb
+    }
+
     fun start(): Boolean {
         runCatching {
             h.Hchat.loader.utils.NativeLibraryLoader()
                 .loadTermux(context.applicationContext ?: context, javaClass.classLoader)
         }.onFailure { HLog.e("[Hchat:Term] libtermux 预加载失败: ${it.message}", it) }
-        if (terminalView.parent == null) {
-            val density = resources.displayMetrics.density
-            var fontSize = Math.round(12f * density)
-            if (fontSize % 2 == 1) fontSize--
-            terminalView.setTextSize(fontSize)
-            runCatching { terminalView.setTypeface(Typeface.MONOSPACE) }
-            terminalView.isVerticalScrollBarEnabled = true
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val thumb = GradientDrawable().apply {
-                    shape = GradientDrawable.RECTANGLE
-                    setColor(0x66FFFFFF)
-                    setSize(dpToPx(4f).toInt(), -1)
-                }
-                runCatching { terminalView.verticalScrollbarThumbDrawable = thumb }
+
+        prepareTerminalView()
+        val holder = TermuxSessions.ensureCurrent(context) ?: return false
+        display(holder, showKeyboard = true)
+        return true
+    }
+
+    fun detach() {
+        TermuxSessions.attachView(null)
+        TerminalBridge.detach(this)
+        session = null
+    }
+
+    private fun prepareTerminalView() {
+        if (viewPrepared && terminalView.parent != null) return
+        val density = resources.displayMetrics.density
+        var fontSize = Math.round(12f * density)
+        if (fontSize % 2 == 1) fontSize--
+        terminalView.setTextSize(fontSize)
+        runCatching { terminalView.setTypeface(Typeface.MONOSPACE) }
+        terminalView.isVerticalScrollBarEnabled = true
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val thumb = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                setColor(0x66FFFFFF)
+                setSize(dpToPx(4f).toInt(), -1)
             }
-            terminalView.keepScreenOn = true
+            runCatching { terminalView.verticalScrollbarThumbDrawable = thumb }
+        }
+        terminalView.keepScreenOn = true
+        terminalView.setTerminalViewClient(viewClient)
+        if (terminalView.parent == null) {
             addView(
                 terminalView,
                 LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
             )
         }
-        val spec = ProotEnvironment.interactiveShell(context) ?: return false
-        val newSession = TerminalSession(
-            spec.executable,
-            spec.cwd,
-            spec.argv,
-            spec.environment,
-            2000,
-            sessionClient,
-        )
-        session = newSession
-        terminalView.attachSession(newSession)
+        viewPrepared = true
+    }
+
+    private fun display(holder: TermuxSession, showKeyboard: Boolean) {
+        val target = holder.session
+        prepareTerminalView()
+        session = target
         terminalView.setTerminalViewClient(viewClient)
-        terminalView.onScreenUpdated()
+        terminalView.attachSession(target)
         terminalView.isFocusable = true
         terminalView.isFocusableInTouchMode = true
+        terminalView.onScreenUpdated()
         terminalView.post { terminalView.updateSize() }
-        terminalView.post {
-            terminalView.requestFocus()
-            showSoftKeyboard()
-        }
-        terminalView.postDelayed({ showSoftKeyboard() }, 350)
+        TermuxSessions.attachView(this)
         TerminalBridge.attach(this)
-        return true
+        if (showKeyboard) {
+            terminalView.post {
+                terminalView.requestFocus()
+                showSoftKeyboard()
+            }
+            terminalView.postDelayed({ showSoftKeyboard() }, 350)
+        }
+    }
+
+
+    override fun onTerminalTextChanged(session: TerminalSession) {
+        if (terminalView.mTermSession === session) {
+            terminalView.post { runCatching { terminalView.onScreenUpdated() } }
+        }
+    }
+
+    override fun onTerminalSessionFinished(session: TerminalSession) {
+        if (this.session !== session) return
+        val code = runCatching { session.exitStatus }.getOrDefault(-1)
+        onFinished?.invoke(code)
+        toast("会话已结束")
+    }
+
+    override fun onTerminalCopyRequested(text: String?) = copyToClipboard(text)
+
+    override fun onTerminalPasteRequested() = pasteFromClipboard()
+
+
+    fun showSessionMenu() {
+        post {
+            runCatching {
+                val all = TermuxSessions.list()
+                val cur = TermuxSessions.current()
+                val labels = ArrayList<String>(all.size + 3)
+                all.forEach { item ->
+                    val mark = if (item.id == cur?.id) "● " else "　"
+                    labels.add("$mark${item.title}${if (item.isRunning) "" else "（已结束）"}")
+                }
+                val newIdx = all.size
+                val closeIdx = if (cur != null) newIdx + 1 else -1
+                val quitIdx = if (cur != null) newIdx + 2 else newIdx + 1
+                labels.add("＋ 新建会话")
+                if (cur != null) {
+                    labels.add(
+                        if (all.size <= 1) "✕ 关闭会话（退出终端）"
+                        else "✕ 关闭 ${cur.title}"
+                    )
+                }
+                labels.add("⏻ 关闭终端（结束全部会话）")
+                AlertDialog.Builder(context)
+                    .setTitle(if (all.size > 1) "终端会话（${all.size} 个）" else "终端会话")
+                    .setItems(labels.toTypedArray()) { _, which ->
+                        when (which) {
+                            newIdx -> newSession()
+                            closeIdx -> closeCurrentSession()
+                            quitIdx -> closeTerminal()
+                            else -> switchTo(all[which])
+                        }
+                    }
+                    .show()
+            }.onFailure { HLog.e("[Hchat:Term] 会话菜单弹出失败: ${it.message}", it) }
+        }
+    }
+
+    private fun switchTo(holder: TermuxSession) {
+        if (holder.session === session) {
+            toast("已经在 ${holder.title}")
+            return
+        }
+        TermuxSessions.select(holder.id)
+        display(holder, showKeyboard = false)
+        toast("已切换到 ${holder.title}")
+    }
+
+    private fun newSession() {
+        val holder = TermuxSessions.create(context)
+        if (holder == null) {
+            toast("新建失败：终端环境未就绪")
+            return
+        }
+        display(holder, showKeyboard = true)
+        toast("已新建 ${holder.title}")
+    }
+
+    private fun closeCurrentSession() {
+        val cur = TermuxSessions.current() ?: return
+        if (TermuxSessions.list().size <= 1) {
+            closeTerminal()
+            return
+        }
+        TermuxSessions.close(cur.id)
+        val next = TermuxSessions.current()
+        if (next != null) display(next, showKeyboard = false)
+        toast("已关闭 ${cur.title}")
+    }
+
+    private fun closeTerminal() {
+        val count = TermuxSessions.list().size
+        detach()
+        TermuxSessions.closeSessions()
+        toast(if (count > 1) "已关闭终端（结束 $count 个会话）" else "已关闭终端")
+        onExitRequested?.invoke()
     }
 
     fun paste(text: String) {
@@ -157,7 +274,7 @@ class ProotTerminalView(context: Context) : FrameLayout(context) {
         val controller = field.get(terminalView) ?: return null
         val sel = IntArray(4)
         controller.javaClass.getMethod("getSelectors", IntArray::class.java).invoke(controller, sel)
-        terminalView.mEmulator?.getSelectedText(sel[0], sel[1], sel[2], sel[3])?.trim()
+        terminalView.mEmulator?.getSelectedText(sel[2], sel[0], sel[3], sel[1])?.trim()
     }.getOrNull()
 
     fun showMoreMenu() {
@@ -165,11 +282,12 @@ class ProotTerminalView(context: Context) : FrameLayout(context) {
             runCatching {
                 AlertDialog.Builder(context)
                     .setTitle("终端")
-                    .setItems(arrayOf("粘贴", "清屏", "发送 Ctrl+C")) { _, which ->
+                    .setItems(arrayOf("粘贴", "清屏", "发送 Ctrl+C", "终端会话…")) { _, which ->
                         when (which) {
                             0 -> pasteFromClipboard()
                             1 -> clearScreen()
                             2 -> paste("\u0003")
+                            3 -> showSessionMenu()
                         }
                     }
                     .show()
@@ -227,59 +345,12 @@ class ProotTerminalView(context: Context) : FrameLayout(context) {
 
     fun isSessionRunning(): Boolean = session?.isRunning == true
 
-    fun destroySession() {
-        runCatching { session?.finishIfRunning() }
-        session = null
-        TerminalBridge.detach(this)
-    }
-
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         TerminalBridge.detach(this)
     }
 
     private fun dpToPx(dp: Float): Float = dp * resources.displayMetrics.density
-
-    private val sessionClient = object : TerminalSessionClient {
-        override fun onTextChanged(changedSession: TerminalSession) {
-            if (changedSession == session) terminalView.onScreenUpdated()
-        }
-
-        override fun onTitleChanged(changedSession: TerminalSession) {}
-
-        override fun onSessionFinished(finishedSession: TerminalSession) {
-            val code = runCatching { finishedSession.exitStatus }.getOrDefault(-1)
-            onFinished?.invoke(code)
-        }
-
-        override fun onCopyTextToClipboard(session: TerminalSession, text: String?) {
-            copyToClipboard(text)
-        }
-
-        override fun onPasteTextFromClipboard(session: TerminalSession?) {
-            pasteFromClipboard()
-        }
-        override fun onBell(session: TerminalSession) {}
-        override fun onColorsChanged(session: TerminalSession) {}
-        override fun onTerminalCursorStateChange(state: Boolean) {}
-        override fun getTerminalCursorStyle(): Int? = null
-
-        override fun logError(tag: String?, message: String?) {
-            HLog.e("[Hchat:Term] $tag $message")
-        }
-
-        override fun logWarn(tag: String?, message: String?) {}
-        override fun logInfo(tag: String?, message: String?) {}
-        override fun logDebug(tag: String?, message: String?) {}
-        override fun logVerbose(tag: String?, message: String?) {}
-        override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) {
-            HLog.e("[Hchat:Term] $tag $message", e)
-        }
-
-        override fun logStackTrace(tag: String?, e: Exception?) {
-            HLog.e("[Hchat:Term] $tag", e)
-        }
-    }
 
     private val viewClient = object : TerminalViewClient {
         override fun onScale(scale: Float): Float = scale
